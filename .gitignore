@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+models/btc_model.pkl
+logs/*.csv

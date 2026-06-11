@@ -1,0 +1,11 @@
+requests
+pandas
+numpy
+scipy
+xgboost
+scikit-learn
+ta
+python-dotenv
+schedule
+rich
+joblib
