@@ -29,3 +29,6 @@ LOGS_DIR = ROOT_DIR / "logs"
 MODEL_PKL_PATH = MODELS_DIR / "btc_model.pkl"
 ALERTS_CSV = LOGS_DIR / "alerts.csv"
 TRADES_CSV = LOGS_DIR / "trades.csv"
+
+# Kalshi API base URL
+KALSHI_BASE_URL: str = "https://trading-api.kalshi.com/trade-api/v2"

@@ -5,7 +5,7 @@ backtest/evaluate.py — Run walk-forward backtest and evaluate strategy perform
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -39,8 +39,14 @@ def _kelly_bet(
     return float(bankroll * raw_kelly)
 
 
+def print_backtest_report(results: Dict[str, Any], bankroll: float = 500.0) -> None:
+    """Public wrapper to pretty-print backtest results (alias for _print_results)."""
+    _print_results(results, bankroll)
+
+
 def run_backtest(
     history_df: pd.DataFrame,
+    model_probs: "Optional[pd.Series]" = None,
     edge_threshold: float = 0.05,
     bankroll: float = 500.0,
     kelly_fraction: float = 0.25,
@@ -81,6 +87,10 @@ def run_backtest(
         }
 
     df = history_df.copy()
+
+    # Inject externally-supplied model probabilities (e.g. from main.py)
+    if model_probs is not None:
+        df["model_prob"] = model_probs.values if hasattr(model_probs, "values") else list(model_probs)
 
     # If model_prob column missing, compute it from lognormal_prob
     if "model_prob" not in df.columns:
@@ -225,6 +235,11 @@ def _print_results(results: Dict[str, Any], bankroll: float) -> None:
         logger.warning("Could not print rich table: %s", exc)
         for k, v in results.items():
             print(f"  {k}: {v}")
+
+
+def print_backtest_report(results: Dict[str, Any]) -> None:
+    """Convenience wrapper — pretty-print a results dict from run_backtest()."""
+    _print_results(results, bankroll=results.get("starting_bankroll", 0.0))
 
 
 def train_model_from_history(history_df: pd.DataFrame) -> MLModel:
