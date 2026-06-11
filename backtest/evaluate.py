@@ -1,189 +1,282 @@
 """
-backtest/evaluate.py — Evaluate model performance and train XGBoost from history.
+backtest/evaluate.py — Run walk-forward backtest and evaluate strategy performance.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Any
 
 import numpy as np
 import pandas as pd
 
-import config
-from features.engineer import FEATURE_NAMES
 from models.ml_model import MLModel
+from features.engineer import FEATURE_NAMES
 
 logger = logging.getLogger(__name__)
 
 
-def compute_kelly_bet(edge: float, win_prob: float, bankroll: float) -> float:
+def _kelly_bet(
+    edge: float,
+    model_prob: float,
+    bankroll: float,
+    kelly_fraction: float,
+    max_bet_pct: float,
+) -> float:
     """
-    Half-Kelly bet sizing.
+    Compute Kelly-fractional bet size.
 
-    kelly_full = edge / (1 - win_prob)   [approximate for binary bets]
-    Returns dollar amount, capped at MAX_BET_PCT of bankroll.
+    For a binary yes/no market:
+        full_kelly = edge / (1 - model_prob)   (approximation for binary bets)
+    Fractional Kelly = kelly_fraction * full_kelly
+    Capped at max_bet_pct of bankroll.
     """
-    if win_prob <= 0 or win_prob >= 1 or edge <= 0:
+    denom = 1.0 - model_prob
+    if denom <= 0:
         return 0.0
-    loss_prob = 1.0 - win_prob
-    kelly_full = edge / loss_prob
-    kelly_frac = kelly_full * config.KELLY_FRACTION
-    max_bet = bankroll * config.MAX_BET_PCT
-    return min(kelly_frac * bankroll, max_bet)
+    raw_kelly = kelly_fraction * abs(edge) / denom
+    raw_kelly = min(raw_kelly, max_bet_pct)
+    return float(bankroll * raw_kelly)
 
 
 def run_backtest(
     history_df: pd.DataFrame,
-    model_probs: pd.Series,
-    edge_threshold: float = None,
-) -> Dict:
+    edge_threshold: float = 0.05,
+    bankroll: float = 500.0,
+    kelly_fraction: float = 0.25,
+    max_bet_pct: float = 0.05,
+) -> Dict[str, Any]:
     """
-    Simulate betting on historical markets using model probabilities.
+    Simulate betting on the historical markets DataFrame and return performance metrics.
 
     Parameters
     ----------
     history_df : pd.DataFrame
-        Output of backtest/simulate.py with columns: actual_outcome, kalshi_implied_prob.
-    model_probs : pd.Series
-        Ensemble model probability for each row (index-aligned to history_df).
+        Output of ``generate_historical_markets()`` that also includes a
+        ``model_prob`` column (lognormal or ensemble probability).
     edge_threshold : float
-        Minimum edge required to bet. Defaults to config.EDGE_THRESHOLD.
+        Minimum |edge| required to place a bet.
+    bankroll : float
+        Starting bankroll in USD.
+    kelly_fraction : float
+        Fractional Kelly multiplier.
+    max_bet_pct : float
+        Maximum single bet as fraction of current bankroll.
 
     Returns
     -------
-    dict with performance metrics.
+    dict with keys:
+        total_bets, win_rate, total_pnl, roi, sharpe_ratio, max_drawdown, avg_edge
     """
-    if edge_threshold is None:
-        edge_threshold = config.EDGE_THRESHOLD
+    if history_df.empty:
+        logger.warning("run_backtest: empty history DataFrame.")
+        return {
+            "total_bets": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "roi": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "avg_edge": 0.0,
+        }
 
     df = history_df.copy()
-    df["model_prob"] = model_probs.values
-    df["edge"] = df["model_prob"] - df["kalshi_implied_prob"]
 
-    # Only bet when edge exceeds threshold
-    bet_mask = df["edge"].abs() >= edge_threshold
-    bets = df[bet_mask].copy()
-
-    if len(bets) == 0:
-        logger.warning("No bets passed edge threshold %.2f in backtest.", edge_threshold)
-        return {"total_bets": 0, "win_rate": 0, "total_pnl": 0, "roi": 0, "sharpe": 0, "max_drawdown": 0}
-
-    bankroll = config.BANKROLL
-    pnl_list = []
-    cumulative = 0.0
-
-    for _, row in bets.iterrows():
-        edge = row["edge"]
-        model_prob = row["model_prob"]
-        actual = row["actual_outcome"]
-
-        # Bet YES if edge > 0, NO if edge < 0
-        if edge > 0:
-            win_prob = model_prob
-            side_correct = actual == 1
+    # If model_prob column missing, compute it from lognormal_prob
+    if "model_prob" not in df.columns:
+        if "lognormal_prob" in df.columns:
+            df["model_prob"] = df["lognormal_prob"]
         else:
-            win_prob = 1.0 - model_prob
-            side_correct = actual == 0
+            raise ValueError("history_df must contain 'model_prob' or 'lognormal_prob' column.")
 
-        bet_size = compute_kelly_bet(abs(edge), win_prob, bankroll)
-        if bet_size <= 0:
+    # Compute edge: model_prob minus Kalshi implied
+    if "edge" not in df.columns:
+        df["edge"] = df["model_prob"] - df["kalshi_implied_prob"]
+
+    # Filter by edge threshold
+    bets_df = df[df["edge"].abs() >= edge_threshold].copy()
+    if bets_df.empty:
+        logger.warning("No bets pass the edge threshold %.2f.", edge_threshold)
+        return {
+            "total_bets": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "roi": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "avg_edge": 0.0,
+        }
+
+    # Simulate sequential betting
+    current_bankroll = bankroll
+    pnl_series = []
+    wins = 0
+
+    for _, row in bets_df.iterrows():
+        bet_usd = _kelly_bet(
+            edge=row["edge"],
+            model_prob=row["model_prob"],
+            bankroll=current_bankroll,
+            kelly_fraction=kelly_fraction,
+            max_bet_pct=max_bet_pct,
+        )
+        if bet_usd < 0.01:
             continue
 
-        # Kalshi: win gets (100 - price) per $price bet
-        # Simplified: pnl = +bet_size if correct, -bet_size if wrong
-        pnl = bet_size if side_correct else -bet_size
-        pnl_list.append(pnl)
-        cumulative += pnl
-        bankroll = max(bankroll + pnl, 1.0)  # bankroll can't go below $1
+        # Determine direction: bet "yes" if edge > 0, "no" if edge < 0
+        bet_yes = row["edge"] > 0
+        outcome = int(row["actual_outcome"])
 
-    if not pnl_list:
-        return {"total_bets": 0}
+        # Payout: Kalshi contracts pay $1 each.
+        # If bet_yes and outcome=1: win (1 - kalshi_yes_price) per $ risked
+        # If bet_yes and outcome=0: lose bet_usd
+        kalshi_yes = float(row["kalshi_implied_prob"])  # in range [0,1]
+        kalshi_no = 1.0 - kalshi_yes
 
-    pnl_arr = np.array(pnl_list)
-    wins = int((pnl_arr > 0).sum())
-    win_rate = wins / len(pnl_arr)
-    total_pnl = float(pnl_arr.sum())
-    roi = total_pnl / config.BANKROLL
+        if bet_yes:
+            # cost per contract = kalshi_yes, payout = 1 → profit = (1-kalshi_yes)/kalshi_yes per $ bet
+            if outcome == 1:
+                pnl = bet_usd * (1.0 - kalshi_yes) / max(kalshi_yes, 1e-6)
+                wins += 1
+            else:
+                pnl = -bet_usd
+        else:
+            # Bet "no" — cost per contract = kalshi_no, payout = 1 if outcome=0
+            if outcome == 0:
+                pnl = bet_usd * (1.0 - kalshi_no) / max(kalshi_no, 1e-6)
+                wins += 1
+            else:
+                pnl = -bet_usd
 
-    # Sharpe (annualized hourly)
-    mean_pnl = pnl_arr.mean()
-    std_pnl = pnl_arr.std() + 1e-9
-    sharpe = (mean_pnl / std_pnl) * np.sqrt(8760)
+        current_bankroll += pnl
+        pnl_series.append(pnl)
+        if current_bankroll <= 0:
+            logger.warning("Bankroll exhausted during backtest.")
+            break
+
+    if not pnl_series:
+        return {
+            "total_bets": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "roi": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "avg_edge": 0.0,
+        }
+
+    total_bets = len(pnl_series)
+    total_pnl = float(sum(pnl_series))
+    win_rate = wins / total_bets if total_bets > 0 else 0.0
+    roi = total_pnl / bankroll
+
+    # Sharpe ratio (annualized using hourly returns approximation)
+    pnl_arr = np.array(pnl_series)
+    daily_std = float(np.std(pnl_arr)) if len(pnl_arr) > 1 else 1.0
+    sharpe = float(np.mean(pnl_arr) / daily_std * np.sqrt(24 * 365)) if daily_std > 0 else 0.0
 
     # Max drawdown
-    cumulative_arr = np.cumsum(pnl_arr)
-    peak = np.maximum.accumulate(cumulative_arr)
-    drawdown = peak - cumulative_arr
-    max_drawdown = float(drawdown.max())
+    cumulative = np.cumsum(pnl_arr)
+    running_max = np.maximum.accumulate(cumulative)
+    drawdowns = running_max - cumulative
+    max_drawdown = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0.0
 
-    avg_edge = float(bets["edge"].abs().mean())
+    avg_edge = float(bets_df["edge"].abs().mean())
 
-    return {
-        "total_bets": len(pnl_arr),
-        "win_rate": round(win_rate, 4),
-        "total_pnl": round(total_pnl, 2),
-        "roi": round(roi, 4),
-        "sharpe": round(sharpe, 3),
-        "max_drawdown": round(max_drawdown, 2),
-        "avg_edge": round(avg_edge, 4),
+    results = {
+        "total_bets": total_bets,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "roi": roi,
+        "sharpe_ratio": sharpe,
+        "max_drawdown": max_drawdown,
+        "avg_edge": avg_edge,
     }
+
+    # Pretty-print via rich
+    _print_results(results, bankroll)
+
+    return results
+
+
+def _print_results(results: Dict[str, Any], bankroll: float) -> None:
+    """Print backtest results as a Rich table."""
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        from rich.panel import Panel
+
+        console = Console()
+        table = Table(title="Backtest Results", show_header=True, header_style="bold cyan")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+
+        table.add_row("Starting Bankroll", f"${bankroll:,.2f}")
+        table.add_row("Total Bets", str(results["total_bets"]))
+        table.add_row("Win Rate", f"{results['win_rate']:.1%}")
+        table.add_row("Total P&L", f"${results['total_pnl']:+,.2f}")
+        table.add_row("ROI", f"{results['roi']:.1%}")
+        table.add_row("Sharpe Ratio", f"{results['sharpe_ratio']:.2f}")
+        table.add_row("Max Drawdown", f"${results['max_drawdown']:,.2f}")
+        table.add_row("Avg |Edge|", f"{results['avg_edge']:.1%}")
+
+        console.print(Panel(table, border_style="green"))
+    except Exception as exc:
+        logger.warning("Could not print rich table: %s", exc)
+        for k, v in results.items():
+            print(f"  {k}: {v}")
 
 
 def train_model_from_history(history_df: pd.DataFrame) -> MLModel:
     """
-    Train XGBoost on simulated historical markets.
-    Uses walk-forward: train on first 80%, evaluate on last 20%.
+    Extract features and outcomes from the history DataFrame and train an XGBoost model.
+
+    Parameters
+    ----------
+    history_df : pd.DataFrame
+        Output of ``generate_historical_markets()``. Must contain feature columns
+        and ``actual_outcome``.
+
+    Returns
+    -------
+    MLModel
+        Trained and saved ML model instance.
     """
-    from sklearn.model_selection import TimeSeriesSplit
+    if history_df.empty:
+        raise ValueError("train_model_from_history: history_df is empty.")
 
-    model = MLModel(pkl_path=config.MODEL_PKL_PATH)
+    # Extract only the feature columns that are present
+    available_features = [f for f in FEATURE_NAMES if f in history_df.columns]
+    if len(available_features) < 5:
+        raise ValueError(
+            f"Not enough feature columns in history_df. Found: {available_features}"
+        )
 
-    feature_cols = [c for c in FEATURE_NAMES if c in history_df.columns]
-    X = history_df[feature_cols].copy()
-    y = history_df["actual_outcome"].copy()
+    X = history_df[available_features].copy()
+    y = history_df["actual_outcome"].astype(int)
 
-    if len(X) < 100:
-        logger.warning("Not enough history (%d rows) to train. Need 100+.", len(X))
-        return model
+    # Drop rows with all-NaN features
+    valid_mask = X.notna().any(axis=1) & y.notna()
+    X = X[valid_mask]
+    y = y[valid_mask]
 
-    split = int(len(X) * 0.8)
-    X_train, X_val = X.iloc[:split], X.iloc[split:]
-    y_train, y_val = y.iloc[:split], y.iloc[split:]
+    if len(X) < 30:
+        raise ValueError(
+            f"Not enough valid samples after filtering: {len(X)} (need ≥30)."
+        )
 
-    logger.info("Training XGBoost on %d samples...", len(X_train))
-    model.train(X_train, y_train)
+    model = MLModel()
 
-    # Quick validation
-    val_probs = pd.Series([model.predict_proba(row.to_dict()) for _, row in X_val.iterrows()])
-    val_preds = (val_probs >= 0.5).astype(int)
-    val_acc = (val_preds.values == y_val.values).mean()
-    logger.info("Validation accuracy: %.2f%%", val_acc * 100)
+    # Ensure all canonical features are present (fill missing with 0)
+    for feat in FEATURE_NAMES:
+        if feat not in X.columns:
+            X[feat] = 0.0
+    X = X[FEATURE_NAMES]
 
+    model.train(X, y)
+    logger.info(
+        "train_model_from_history: trained on %d samples, %d features.",
+        len(X),
+        len(FEATURE_NAMES),
+    )
     return model
-
-
-def print_backtest_report(metrics: Dict) -> None:
-    """Print a formatted backtest report to the terminal."""
-    try:
-        from rich.console import Console
-        from rich.table import Table
-        from rich import box
-
-        console = Console()
-        table = Table(title="Backtest Results", box=box.ROUNDED, show_header=True)
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
-
-        table.add_row("Total Bets", str(metrics.get("total_bets", 0)))
-        table.add_row("Win Rate", f"{metrics.get('win_rate', 0)*100:.1f}%")
-        table.add_row("Total P&L", f"${metrics.get('total_pnl', 0):.2f}")
-        table.add_row("ROI", f"{metrics.get('roi', 0)*100:.1f}%")
-        table.add_row("Sharpe Ratio", f"{metrics.get('sharpe', 0):.3f}")
-        table.add_row("Max Drawdown", f"${metrics.get('max_drawdown', 0):.2f}")
-        table.add_row("Avg Edge", f"{metrics.get('avg_edge', 0)*100:.2f}%")
-
-        console.print(table)
-    except ImportError:
-        for k, v in metrics.items():
-            print(f"  {k}: {v}")
