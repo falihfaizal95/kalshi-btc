@@ -64,3 +64,33 @@ def prob_below_strike(
     P(BTC < strike at T) = 1 - P(BTC > strike at T).
     """
     return 1.0 - prob_above_strike(current_price, strike, time_hours, annual_vol)
+
+
+def market_yes_prob(
+    current_price: float,
+    market: dict,
+    time_hours: float,
+    annual_vol: float,
+) -> float:
+    """
+    P(market resolves YES) for a Kalshi BTC market dict with keys
+    strike_type ("greater"|"less"|"between"), floor_strike, cap_strike.
+
+    greater : YES if price > floor_strike
+    less    : YES if price < cap_strike
+    between : YES if floor_strike <= price <= cap_strike
+    """
+    strike_type = market.get("strike_type", "greater")
+    floor = market.get("floor_strike")
+    cap = market.get("cap_strike")
+
+    if strike_type == "greater":
+        return prob_above_strike(current_price, floor, time_hours, annual_vol)
+    if strike_type == "less":
+        return prob_below_strike(current_price, cap, time_hours, annual_vol)
+    if strike_type == "between":
+        p_above_floor = prob_above_strike(current_price, floor, time_hours, annual_vol)
+        p_above_cap = prob_above_strike(current_price, cap, time_hours, annual_vol)
+        return max(0.0, p_above_floor - p_above_cap)
+    # Unknown type — neutral
+    return 0.5

@@ -17,25 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 def _kelly_bet(
-    edge: float,
-    model_prob: float,
+    win_prob: float,
+    cost: float,
     bankroll: float,
     kelly_fraction: float,
     max_bet_pct: float,
 ) -> float:
     """
-    Compute Kelly-fractional bet size.
+    Kelly-fractional bet size in USD for a binary contract.
 
-    For a binary yes/no market:
-        full_kelly = edge / (1 - model_prob)   (approximation for binary bets)
-    Fractional Kelly = kelly_fraction * full_kelly
-    Capped at max_bet_pct of bankroll.
+    Buying at price ``cost`` (in [0,1]) with $1 payout on a win, the
+    full-Kelly bankroll fraction is (win_prob - cost) / (1 - cost).
+    Scaled by kelly_fraction and capped at max_bet_pct of bankroll.
     """
-    denom = 1.0 - model_prob
-    if denom <= 0:
+    if cost <= 0 or cost >= 1:
         return 0.0
-    raw_kelly = kelly_fraction * abs(edge) / denom
-    raw_kelly = min(raw_kelly, max_bet_pct)
+    full_kelly = (win_prob - cost) / (1.0 - cost)
+    if full_kelly <= 0:
+        return 0.0
+    raw_kelly = min(kelly_fraction * full_kelly, max_bet_pct)
     return float(bankroll * raw_kelly)
 
 
@@ -123,9 +123,24 @@ def run_backtest(
     wins = 0
 
     for _, row in bets_df.iterrows():
+        # Determine direction: bet "yes" if edge > 0, "no" if edge < 0
+        bet_yes = row["edge"] > 0
+        outcome = int(row["actual_outcome"])
+
+        kalshi_yes = float(row["kalshi_implied_prob"])  # in range [0,1]
+        kalshi_no = 1.0 - kalshi_yes
+
+        # Cost and win probability for the side we take
+        if bet_yes:
+            cost = kalshi_yes
+            win_prob = float(row["model_prob"])
+        else:
+            cost = kalshi_no
+            win_prob = 1.0 - float(row["model_prob"])
+
         bet_usd = _kelly_bet(
-            edge=row["edge"],
-            model_prob=row["model_prob"],
+            win_prob=win_prob,
+            cost=cost,
             bankroll=current_bankroll,
             kelly_fraction=kelly_fraction,
             max_bet_pct=max_bet_pct,
@@ -133,30 +148,13 @@ def run_backtest(
         if bet_usd < 0.01:
             continue
 
-        # Determine direction: bet "yes" if edge > 0, "no" if edge < 0
-        bet_yes = row["edge"] > 0
-        outcome = int(row["actual_outcome"])
-
-        # Payout: Kalshi contracts pay $1 each.
-        # If bet_yes and outcome=1: win (1 - kalshi_yes_price) per $ risked
-        # If bet_yes and outcome=0: lose bet_usd
-        kalshi_yes = float(row["kalshi_implied_prob"])  # in range [0,1]
-        kalshi_no = 1.0 - kalshi_yes
-
-        if bet_yes:
-            # cost per contract = kalshi_yes, payout = 1 → profit = (1-kalshi_yes)/kalshi_yes per $ bet
-            if outcome == 1:
-                pnl = bet_usd * (1.0 - kalshi_yes) / max(kalshi_yes, 1e-6)
-                wins += 1
-            else:
-                pnl = -bet_usd
+        # Payout: contracts pay $1; profit = (1 - cost)/cost per $ risked on a win
+        won = (bet_yes and outcome == 1) or (not bet_yes and outcome == 0)
+        if won:
+            pnl = bet_usd * (1.0 - cost) / max(cost, 1e-6)
+            wins += 1
         else:
-            # Bet "no" — cost per contract = kalshi_no, payout = 1 if outcome=0
-            if outcome == 0:
-                pnl = bet_usd * (1.0 - kalshi_no) / max(kalshi_no, 1e-6)
-                wins += 1
-            else:
-                pnl = -bet_usd
+            pnl = -bet_usd
 
         current_bankroll += pnl
         pnl_series.append(pnl)
@@ -235,11 +233,6 @@ def _print_results(results: Dict[str, Any], bankroll: float) -> None:
         logger.warning("Could not print rich table: %s", exc)
         for k, v in results.items():
             print(f"  {k}: {v}")
-
-
-def print_backtest_report(results: Dict[str, Any]) -> None:
-    """Convenience wrapper — pretty-print a results dict from run_backtest()."""
-    _print_results(results, bankroll=results.get("starting_bankroll", 0.0))
 
 
 def train_model_from_history(history_df: pd.DataFrame) -> MLModel:

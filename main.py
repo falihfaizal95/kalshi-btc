@@ -97,6 +97,10 @@ def _train_and_backtest() -> None:
         max_bet_pct=cfg.MAX_BET_PCT,
     )
     logger.info("Backtest results: %s", results)
+    console.print(
+        "[dim]Note: backtest prices are simulated (lognormal + noise), so P&L "
+        "validates the pipeline, not real market edge.[/dim]"
+    )
 
     # Train XGBoost model
     console.print("[cyan]Training XGBoost model on historical features...[/cyan]")
@@ -161,36 +165,49 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Validate config
-    # ------------------------------------------------------------------
-    if not cfg.KALSHI_EMAIL or not cfg.KALSHI_PASSWORD:
-        console.print(
-            "[red]ERROR: KALSHI_EMAIL and KALSHI_PASSWORD must be set in .env[/red]"
-        )
-        console.print("[dim]Copy .env.example to .env and fill in your credentials.[/dim]")
-        sys.exit(1)
-
-    # ------------------------------------------------------------------
-    # Authenticate with Kalshi
+    # Set up Kalshi client (market data is public; keys only needed to trade)
     # ------------------------------------------------------------------
     from kalshi.client import KalshiClient
 
-    client = KalshiClient()
-    console.print("[cyan]Logging in to Kalshi...[/cyan]")
     try:
-        client.login(cfg.KALSHI_EMAIL, cfg.KALSHI_PASSWORD)
-        console.print("[green]Kalshi login successful.[/green]")
+        client = KalshiClient(
+            api_key_id=cfg.KALSHI_API_KEY_ID or None,
+            private_key_path=cfg.KALSHI_PRIVATE_KEY_PATH or None,
+            demo=cfg.KALSHI_DEMO,
+        )
     except Exception as exc:
-        console.print(f"[red]Kalshi login failed: {exc}[/red]")
-        logger.error("Kalshi login failed: %s", exc)
+        console.print(f"[red]Failed to initialize Kalshi client: {exc}[/red]")
+        logger.error("Kalshi client init failed: %s", exc)
         sys.exit(1)
+
+    if client.can_trade:
+        try:
+            balance = client.get_balance()
+            cents = balance.get("balance", 0)
+            console.print(
+                f"[green]Kalshi API key verified. Balance: ${cents / 100:,.2f}[/green]"
+            )
+        except Exception as exc:
+            console.print(f"[red]Kalshi API key check failed: {exc}[/red]")
+            logger.error("Kalshi auth check failed: %s", exc)
+            sys.exit(1)
+    else:
+        if cfg.AUTO_TRADE:
+            console.print(
+                "[red]ERROR: AUTO_TRADE=true requires KALSHI_API_KEY_ID and "
+                "KALSHI_PRIVATE_KEY_PATH in .env[/red]"
+            )
+            sys.exit(1)
+        console.print(
+            "[yellow]No Kalshi API credentials — running in read-only scan mode.[/yellow]"
+        )
 
     # ------------------------------------------------------------------
     # Backtest / model training
     # ------------------------------------------------------------------
     needs_training = not cfg.MODEL_PKL_PATH.exists()
 
-    if args.backtest_only or needs_training and not args.no_train:
+    if args.backtest_only or (needs_training and not args.no_train):
         _train_and_backtest()
     elif not args.no_train and not needs_training:
         console.print(

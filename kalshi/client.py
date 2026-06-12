@@ -1,111 +1,184 @@
 """
-kalshi/client.py — Full Kalshi REST API client with auth, token refresh, and order placement.
+kalshi/client.py — Kalshi REST API client using API-key + RSA-PSS request signing.
+
+Kalshi retired email/password login. Authentication now works by signing
+``timestamp + HTTP method + path`` with an RSA private key and sending:
+
+    KALSHI-ACCESS-KEY        your API key ID
+    KALSHI-ACCESS-TIMESTAMP  unix epoch milliseconds
+    KALSHI-ACCESS-SIGNATURE  base64 RSA-PSS-SHA256 signature
+
+Public market-data endpoints (e.g. GET /markets) need no auth, so the client
+works in read-only mode without credentials; order placement requires them.
 """
 
 from __future__ import annotations
 
-import time
+import base64
+import datetime
 import logging
+import time
+import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+PROD_BASE_URL = "https://api.elections.kalshi.com"
+DEMO_BASE_URL = "https://demo-api.kalshi.co"
+API_PREFIX = "/trade-api/v2"
+
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
 
 
 class KalshiClient:
-    """Thread-safe Kalshi API client with automatic token refresh."""
+    """Kalshi API client with RSA request signing and basic retry/backoff."""
 
-    def __init__(self) -> None:
-        self._token: Optional[str] = None
-        self._email: Optional[str] = None
-        self._password: Optional[str] = None
+    def __init__(
+        self,
+        api_key_id: Optional[str] = None,
+        private_key_path: Optional[str] = None,
+        demo: bool = False,
+    ) -> None:
+        self._api_key_id = api_key_id or None
+        self._private_key: Optional[RSAPrivateKey] = None
+        self._base = DEMO_BASE_URL if demo else PROD_BASE_URL
         self._session = requests.Session()
-        self._session.headers.update({"Content-Type": "application/json"})
+
+        if private_key_path:
+            self._load_private_key(private_key_path)
 
     # ------------------------------------------------------------------
-    # Authentication
+    # Auth
     # ------------------------------------------------------------------
 
-    def login(self, email: str, password: str) -> None:
-        """Authenticate with Kalshi and store the bearer token."""
-        self._email = email
-        self._password = password
+    def _load_private_key(self, path: str) -> None:
+        key_file = Path(path).expanduser()
+        if not key_file.exists():
+            raise FileNotFoundError(f"Kalshi private key not found: {key_file}")
+        with open(key_file, "rb") as f:
+            key = serialization.load_pem_private_key(f.read(), password=None)
+        if not isinstance(key, RSAPrivateKey):
+            raise ValueError(f"Expected an RSA private key in {key_file}.")
+        self._private_key = key
+        logger.info("Loaded Kalshi RSA private key from %s.", key_file)
 
-        payload = {"email": email, "password": password}
-        try:
-            resp = self._session.post(f"{BASE_URL}/login", json=payload, timeout=15)
-            resp.raise_for_status()
-        except requests.HTTPError as exc:
-            raise RuntimeError(
-                f"Kalshi login failed ({exc.response.status_code}): {exc.response.text}"
-            ) from exc
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Kalshi login network error: {exc}") from exc
+    @property
+    def can_trade(self) -> bool:
+        """True if credentials are configured for authenticated endpoints."""
+        return bool(self._api_key_id and self._private_key)
 
-        data = resp.json()
-        token = data.get("token")
-        if not token:
-            raise RuntimeError(f"Kalshi login returned no token. Response: {data}")
+    def _sign(self, timestamp_ms: str, method: str, path: str) -> str:
+        """RSA-PSS-SHA256 signature over timestamp + method + path (no query)."""
+        assert self._private_key is not None
+        message = f"{timestamp_ms}{method}{path}".encode("utf-8")
+        signature = self._private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return base64.b64encode(signature).decode("utf-8")
 
-        self._token = token
-        self._session.headers.update({"Authorization": f"Bearer {token}"})
-        logger.info("Kalshi login successful.")
-
-    def _refresh_token(self) -> None:
-        """Re-authenticate using stored credentials."""
-        if not self._email or not self._password:
-            raise RuntimeError("Cannot refresh token: credentials not set. Call login() first.")
-        logger.warning("Refreshing Kalshi token...")
-        self.login(self._email, self._password)
+    def _auth_headers(self, method: str, path: str) -> Dict[str, str]:
+        """Build signed auth headers; empty dict when running unauthenticated."""
+        if not self.can_trade:
+            return {}
+        timestamp_ms = str(
+            int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+        )
+        return {
+            "KALSHI-ACCESS-KEY": self._api_key_id,  # type: ignore[dict-item]
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": self._sign(timestamp_ms, method, path),
+        }
 
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Authenticated GET request. Auto-refreshes on 401."""
-        url = f"{BASE_URL}{path}"
-        for attempt in range(2):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        body: Optional[Dict[str, Any]] = None,
+        auth_required: bool = False,
+    ) -> Dict[str, Any]:
+        """Issue a request. Signs the un-prefixed path (without query params)."""
+        if auth_required and not self.can_trade:
+            raise RuntimeError(
+                "This endpoint requires Kalshi API credentials. "
+                "Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env."
+            )
+
+        full_path = f"{API_PREFIX}{path}"
+        url = f"{self._base}{full_path}"
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES):
+            headers = self._auth_headers(method, full_path)
             try:
-                resp = self._session.get(url, params=params, timeout=15)
-                if resp.status_code == 401 and attempt == 0:
-                    self._refresh_token()
+                resp = self._session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=body,
+                    headers=headers,
+                    timeout=15,
+                )
+                if resp.status_code in _RETRY_STATUS:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "Kalshi %s %s returned %d; retrying in %ds.",
+                        method, path, resp.status_code, wait,
+                    )
+                    time.sleep(wait)
                     continue
                 resp.raise_for_status()
                 return resp.json()
             except requests.HTTPError as exc:
                 raise RuntimeError(
-                    f"Kalshi GET {path} failed ({exc.response.status_code}): {exc.response.text}"
+                    f"Kalshi {method} {path} failed "
+                    f"({exc.response.status_code}): {exc.response.text}"
                 ) from exc
             except requests.RequestException as exc:
-                raise RuntimeError(f"Kalshi GET {path} network error: {exc}") from exc
-        raise RuntimeError(f"Kalshi GET {path}: exceeded retry attempts.")
+                last_exc = exc
+                wait = 2 ** attempt
+                logger.warning(
+                    "Kalshi %s %s network error: %s; retrying in %ds.",
+                    method, path, exc, wait,
+                )
+                time.sleep(wait)
+
+        raise RuntimeError(
+            f"Kalshi {method} {path}: exceeded {_MAX_RETRIES} attempts. "
+            f"Last error: {last_exc}"
+        )
+
+    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """GET request. Signed when credentials exist; public endpoints work without."""
+        return self._request("GET", path, params=params)
 
     def post(self, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Authenticated POST request. Auto-refreshes on 401."""
-        url = f"{BASE_URL}{path}"
-        for attempt in range(2):
-            try:
-                resp = self._session.post(url, json=body or {}, timeout=15)
-                if resp.status_code == 401 and attempt == 0:
-                    self._refresh_token()
-                    continue
-                resp.raise_for_status()
-                return resp.json()
-            except requests.HTTPError as exc:
-                raise RuntimeError(
-                    f"Kalshi POST {path} failed ({exc.response.status_code}): {exc.response.text}"
-                ) from exc
-            except requests.RequestException as exc:
-                raise RuntimeError(f"Kalshi POST {path} network error: {exc}") from exc
-        raise RuntimeError(f"Kalshi POST {path}: exceeded retry attempts.")
+        """Authenticated POST request."""
+        return self._request("POST", path, body=body or {}, auth_required=True)
 
     # ------------------------------------------------------------------
-    # Order placement
+    # Account / orders
     # ------------------------------------------------------------------
+
+    def get_balance(self) -> Dict[str, Any]:
+        """Fetch account balance (authenticated)."""
+        return self._request("GET", "/portfolio/balance", auth_required=True)
 
     def place_order(
         self,
@@ -120,13 +193,13 @@ class KalshiClient:
         Parameters
         ----------
         market_id : str
-            The Kalshi market ticker/ID.
+            The Kalshi market ticker.
         side : str
             "yes" or "no".
         contracts : int
-            Number of contracts (each contract is worth $1 max).
+            Number of contracts (each settles at $1 max).
         price : float
-            Limit price in cents (1-99).
+            Limit price in cents (1-99) for the chosen side.
         """
         if side not in ("yes", "no"):
             raise ValueError(f"side must be 'yes' or 'no', got: {side!r}")
@@ -137,17 +210,22 @@ class KalshiClient:
 
         body: Dict[str, Any] = {
             "ticker": market_id,
+            "client_order_id": str(uuid.uuid4()),
             "action": "buy",
             "side": side,
             "type": "limit",
-            "count": contracts,
-            "yes_price": int(price) if side == "yes" else int(100 - price),
-            "no_price": int(100 - price) if side == "yes" else int(price),
+            "count": int(contracts),
         }
+        # Provide only the price field for the side being bought.
+        if side == "yes":
+            body["yes_price"] = int(price)
+        else:
+            body["no_price"] = int(price)
+
         logger.info(
             "Placing order: market=%s side=%s contracts=%d price=%d¢",
             market_id, side, contracts, price,
         )
-        result = self.post("/orders", body)
+        result = self.post("/portfolio/orders", body)
         logger.info("Order placed: %s", result)
         return result

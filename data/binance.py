@@ -12,7 +12,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-BINANCE_BASE = "https://api.binance.com/api/v3"
+# binance.com returns HTTP 451 from US IPs; binance.us serves the same API.
+BINANCE_BASES = [
+    "https://api.binance.com/api/v3",
+    "https://api.binance.us/api/v3",
+]
 
 
 def get_ohlcv(
@@ -37,15 +41,21 @@ def get_ohlcv(
     pd.DataFrame
         Columns: timestamp (UTC datetime index), open, high, low, close, volume.
     """
-    url = f"{BINANCE_BASE}/klines"
     params = {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)}
 
-    try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        raw = resp.json()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Binance klines request failed ({interval}): {exc}") from exc
+    raw = None
+    last_exc: Exception | None = None
+    for base in BINANCE_BASES:
+        try:
+            resp = requests.get(f"{base}/klines", params=params, timeout=15)
+            resp.raise_for_status()
+            raw = resp.json()
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            logger.warning("Binance klines failed at %s: %s", base, exc)
+    if raw is None:
+        raise RuntimeError(f"Binance klines request failed ({interval}): {last_exc}") from last_exc
 
     if not raw:
         raise RuntimeError(f"Binance returned empty data for {symbol} {interval}.")
@@ -87,19 +97,19 @@ def get_current_price(symbol: str = "BTCUSDT") -> float:
     float
         Current price.
     """
-    url = f"{BINANCE_BASE}/ticker/price"
     params = {"symbol": symbol}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        price = float(data["price"])
-        logger.debug("Binance spot price for %s: %.2f", symbol, price)
-        return price
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Binance ticker/price request failed for {symbol}: {exc}") from exc
-    except (KeyError, ValueError) as exc:
-        raise RuntimeError(f"Binance ticker/price parse error for {symbol}: {exc}") from exc
+    last_exc: Exception | None = None
+    for base in BINANCE_BASES:
+        try:
+            resp = requests.get(f"{base}/ticker/price", params=params, timeout=10)
+            resp.raise_for_status()
+            price = float(resp.json()["price"])
+            logger.debug("Binance spot price for %s: %.2f", symbol, price)
+            return price
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            last_exc = exc
+            logger.warning("Binance ticker/price failed at %s: %s", base, exc)
+    raise RuntimeError(f"Binance ticker/price request failed for {symbol}: {last_exc}") from last_exc
 
 
 def get_ohlcv_multi(

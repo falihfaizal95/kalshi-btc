@@ -3,3 +3,4 @@ __pycache__/
 .env
 models/btc_model.pkl
 logs/*.csv
+.venv/

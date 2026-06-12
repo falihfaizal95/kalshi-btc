@@ -42,18 +42,25 @@ def compute_edge(market: Dict[str, Any], ensemble_prob: float) -> float:
 
 
 def _kelly_bet_size(
-    edge: float,
-    model_prob: float,
+    win_prob: float,
+    cost: float,
     bankroll: float,
     kelly_fraction: float,
     max_bet_pct: float,
 ) -> float:
-    """Return Kelly-fraction bet in USD."""
-    denom = 1.0 - model_prob
-    if denom <= 0 or abs(edge) < 1e-6:
+    """
+    Kelly bet in USD for a binary contract.
+
+    Buying a contract at price ``cost`` (in [0,1]) that pays $1 on a win,
+    the full-Kelly bankroll fraction is (win_prob - cost) / (1 - cost).
+    Scaled by kelly_fraction and capped at max_bet_pct of bankroll.
+    """
+    if cost <= 0 or cost >= 1:
         return 0.0
-    raw = kelly_fraction * abs(edge) / denom
-    capped = min(raw, max_bet_pct)
+    full_kelly = (win_prob - cost) / (1.0 - cost)
+    if full_kelly <= 0:
+        return 0.0
+    capped = min(kelly_fraction * full_kelly, max_bet_pct)
     return float(bankroll * capped)
 
 
@@ -131,7 +138,7 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
     from data.deribit import get_iv
     from data.sentiment import get_fear_greed
     from features.engineer import build_feature_vector
-    from models.lognormal import prob_above_strike
+    from models.lognormal import market_yes_prob
     from models.ensemble import EnsembleModel
 
     console = Console()
@@ -194,8 +201,16 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
         if time_to_expiry_h < 0.05:
             continue  # market essentially expired
 
-        # Log-normal probability
-        ln_prob = prob_above_strike(btc_price, strike, time_to_expiry_h, iv)
+        # Skip empty/illiquid books — a missing ask defaults to 100¢, which
+        # would otherwise produce a meaningless 50¢ mid and a fake edge.
+        yes_bid_c = float(market.get("yes_bid", 0) or 0)
+        yes_ask_c = float(market.get("yes_ask", 100) or 100)
+        max_spread = getattr(cfg, "MAX_SPREAD_CENTS", 10.0)
+        if yes_ask_c >= 100 or (yes_ask_c - yes_bid_c) > max_spread:
+            continue
+
+        # Log-normal probability of YES (handles greater/less/between markets)
+        ln_prob = market_yes_prob(btc_price, market, time_to_expiry_h, iv)
 
         # Build features
         try:
@@ -219,16 +234,23 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
         # Kalshi mid price
         yes_mid = ((market.get("yes_bid", 0) or 0) + (market.get("yes_ask", 100) or 100)) / 2.0
 
-        # Kelly bet
+        # Kelly bet — sized against the price we would actually pay (the ask)
+        direction = "YES" if edge > 0 else "NO"
+        if direction == "YES":
+            cost = (market.get("yes_ask", 100) or 100) / 100.0
+            win_prob = ensemble_prob
+        else:
+            cost = (market.get("no_ask", 100) or 100) / 100.0
+            win_prob = 1.0 - ensemble_prob
+
         kelly_usd = _kelly_bet_size(
-            edge=edge,
-            model_prob=ensemble_prob,
+            win_prob=win_prob,
+            cost=cost,
             bankroll=cfg.BANKROLL,
             kelly_fraction=cfg.KELLY_FRACTION,
             max_bet_pct=cfg.MAX_BET_PCT,
         )
 
-        direction = "YES" if edge > 0 else "NO"
         expiry_str = expiry.strftime("%m/%d %H:%M") if expiry else "N/A"
 
         alerts.append(
@@ -247,6 +269,7 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
                 "abs_edge": abs(edge),
                 "yes_bid": market.get("yes_bid", 0),
                 "yes_ask": market.get("yes_ask", 100),
+                "no_ask": market.get("no_ask", 100),
             }
         )
 
@@ -332,13 +355,11 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
         for a in qualifying:
             try:
                 side = a["direction"].lower()  # "yes" or "no"
-                # Use yes_ask for YES bets (conservative), yes_bid for NO bets
+                # Buy at the ask for the side we want (conservative limit price)
                 if side == "yes":
-                    price_cents = int(min(a["yes_ask"], 99))
+                    price_cents = int(min(max(a["yes_ask"], 1), 99))
                 else:
-                    # Betting "no" — no_ask = 100 - yes_bid
-                    no_ask = 100 - int(a["yes_bid"] or 1)
-                    price_cents = int(min(max(no_ask, 1), 99))
+                    price_cents = int(min(max(a["no_ask"], 1), 99))
 
                 # Number of contracts = floor(kelly_usd / price_cents * 100)
                 # Each contract costs price_cents / 100 dollars

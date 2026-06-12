@@ -3,32 +3,36 @@ config.py — Load all environment variables from .env and expose as typed const
 """
 
 import os
+import pathlib
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Kalshi credentials
-KALSHI_EMAIL: str = os.getenv("KALSHI_EMAIL", "")
-KALSHI_PASSWORD: str = os.getenv("KALSHI_PASSWORD", "")
+# Kalshi API credentials (generate a key pair at kalshi.com -> Account -> API keys).
+# Only required for order placement / balance; market scanning is public.
+KALSHI_API_KEY_ID: str = os.getenv("KALSHI_API_KEY_ID", "")
+KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+
+_demo_raw: str = os.getenv("KALSHI_DEMO", "false").strip().lower()
+KALSHI_DEMO: bool = _demo_raw in ("1", "true", "yes", "on")
 
 # Trading parameters
 BANKROLL: float = float(os.getenv("BANKROLL", "500"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.5"))
 MAX_BET_PCT: float = float(os.getenv("MAX_BET_PCT", "0.05"))
 EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.05"))
+# Skip markets whose bid/ask spread is wider than this (illiquid/empty books)
+MAX_SPREAD_CENTS: float = float(os.getenv("MAX_SPREAD_CENTS", "10"))
 
 # Auto-trade flag
 _auto_trade_raw: str = os.getenv("AUTO_TRADE", "false").strip().lower()
 AUTO_TRADE: bool = _auto_trade_raw in ("1", "true", "yes", "on")
 
 # Derived paths
-import pathlib
 ROOT_DIR = pathlib.Path(__file__).parent
 MODELS_DIR = ROOT_DIR / "models"
 LOGS_DIR = ROOT_DIR / "logs"
 MODEL_PKL_PATH = MODELS_DIR / "btc_model.pkl"
 ALERTS_CSV = LOGS_DIR / "alerts.csv"
 TRADES_CSV = LOGS_DIR / "trades.csv"
-
-# Kalshi API base URL
-KALSHI_BASE_URL: str = "https://trading-api.kalshi.com/trade-api/v2"

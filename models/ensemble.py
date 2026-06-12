@@ -23,13 +23,15 @@ class EnsembleModel:
     ml_weight : float
         Weight given to the ML model (0-1). The log-normal model receives
         ``1 - ml_weight``. Default 0.6.
-    model_dir : str
-        Directory where the ML model pickle is stored.
+    model_dir : str, optional
+        Directory where the ML model pickle is stored. Defaults to the
+        package's own models/ directory (absolute, independent of cwd).
     """
 
-    def __init__(self, ml_weight: float = 0.6, model_dir: str = "models") -> None:
+    def __init__(self, ml_weight: float = 0.6, model_dir: Optional[str] = None) -> None:
+        import pathlib
         self._ml_weight = float(ml_weight)
-        self._model_dir = model_dir
+        self._model_dir = pathlib.Path(model_dir) if model_dir else pathlib.Path(__file__).parent
         self._ml: Optional[object] = None   # lazy-loaded MLModel
         self._ml_loaded = False
         self._ml_trained = False
@@ -43,10 +45,7 @@ class EnsembleModel:
             return
         try:
             from models.ml_model import MLModel
-            ml = MLModel(pkl_path=None)
-            # Override default pkl path with our model_dir
-            import pathlib
-            ml.pkl_path = pathlib.Path(self._model_dir) / "btc_model.pkl"
+            ml = MLModel(pkl_path=self._model_dir / "btc_model.pkl")
             self._ml_trained = ml.load()
             self._ml = ml
         except Exception as exc:
@@ -111,8 +110,7 @@ class EnsembleModel:
     def retrain(self, X, y) -> None:
         """Re-train the underlying ML model and reload it."""
         from models.ml_model import MLModel
-        import pathlib
-        ml = MLModel(pkl_path=pathlib.Path(self._model_dir) / "btc_model.pkl")
+        ml = MLModel(pkl_path=self._model_dir / "btc_model.pkl")
         ml.train(X, y)
         self._ml = ml
         self._ml_trained = True

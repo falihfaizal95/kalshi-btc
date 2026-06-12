@@ -1,5 +1,14 @@
 """
 backtest/simulate.py — Simulate historical Kalshi-style binary BTC markets.
+
+IMPORTANT LIMITATION: historical Kalshi order books are not available here, so
+simulated market prices are generated as (lognormal model probability + random
+noise). Because the strategy's own probability model is that same lognormal,
+any P&L the backtest reports comes from betting against the injected noise and
+is NOT evidence of real-world edge. The backtest is still useful for:
+  - training the XGBoost model (features -> actual outcomes is real signal)
+  - sanity-checking bet sizing, payout math, and the pipeline end to end
+Treat ROI/Sharpe/win-rate numbers as plumbing tests, not strategy validation.
 """
 
 from __future__ import annotations
@@ -94,7 +103,9 @@ def generate_historical_markets(
                     logger.debug("Feature build failed at i=%d: %s", i, exc)
                     continue
 
-                # Simulate Kalshi pricing: log-normal + small noise
+                # Simulate Kalshi pricing: log-normal + small noise.
+                # See module docstring — edges vs. this synthetic price are
+                # artificial; they exist only to exercise the pipeline.
                 noise = np.random.uniform(-0.03, 0.03)
                 kalshi_implied = float(np.clip(ln_prob + noise, 0.02, 0.98))
 
