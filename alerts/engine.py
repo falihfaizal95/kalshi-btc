@@ -114,7 +114,7 @@ def _log_trade(
         writer.writerow(row)
 
 
-def scan_markets(client, cfg) -> List[Dict[str, Any]]:
+def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
     """
     Main scanning loop: fetch markets, score them, display results, optionally trade.
 
@@ -124,6 +124,9 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
         Authenticated Kalshi API client.
     cfg : module
         Loaded config module (config.py) with BANKROLL, KELLY_FRACTION, etc.
+    full : bool
+        If True, return ALL scored liquid markets (for unbiased calibration
+        data) instead of only those passing the edge threshold.
 
     Returns
     -------
@@ -396,4 +399,4 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
                 console.print(f"[red]Failed to place order on {a['market_id']}: {exc}[/red]")
                 logger.error("Order placement failed for %s: %s", a["market_id"], exc)
 
-    return qualifying
+    return alerts if full else qualifying

@@ -2,28 +2,25 @@
 """
 scripts/daily_backtest.py — Daily strategy maintenance + real-outcome tracking.
 
-Designed to run once a day (locally via cron or via the scheduled cloud agent).
-Each run does four things:
+Runs once a day (locally or via the scheduled cloud agent). Each run:
 
-  1. SETTLE   — for every past prediction whose market has expired, fetch the
-                actual BTC outcome and record whether our call won and its P&L.
-                This is the only source of *real* edge measurement.
+  1. SETTLE   — settle matured predictions and paper positions against the
+                actual BTC outcome (the only real edge measurement).
   2. RETRAIN  — retrain the XGBoost model on the latest BTC history.
-  3. SNAPSHOT — run a live scan and log today's qualifying predictions (with the
-                real Kalshi prices we'd pay) so they can be settled later.
-  4. REPORT   — write a dated markdown report summarizing accumulated real
-                performance and a pipeline-sanity backtest.
+  3. RECORD   — log predictions for ALL liquid next-hour markets (unbiased
+                calibration dataset) and run a paper-trading cycle on the edges.
+  4. REPORT   — write a dated markdown report of accumulated real performance.
 
-The CSVs in tracking/ are committed to git so data compounds across runs even
-when the agent starts from a fresh clone each day.
+The continuous launchd cycle (scripts/paper_cycle.py) already does the
+settle/record/trade steps every 15 minutes; this daily job adds retraining,
+the report, and the git commit (via the scheduled agent). All tracking CSVs in
+tracking/ are committed so data compounds across runs.
 """
 
 from __future__ import annotations
 
-import csv
 import logging
 import sys
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,114 +29,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config as cfg  # noqa: E402
+import prediction_log  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("daily_backtest")
 
-TRACKING_DIR = PROJECT_ROOT / "tracking"
 REPORTS_DIR = PROJECT_ROOT / "reports"
-PREDICTIONS_CSV = TRACKING_DIR / "predictions.csv"
-SETTLEMENTS_CSV = TRACKING_DIR / "settlements.csv"
 
-PRED_FIELDS = [
-    "pred_id", "snapshot_ts", "market_id", "strike_type",
-    "floor_strike", "cap_strike", "expiry_iso", "direction",
-    "model_prob", "win_prob", "cost", "edge", "kelly_bet_usd",
-]
-SETTLE_FIELDS = [
-    "pred_id", "settled_ts", "actual_close", "actual_yes", "won",
-    "win_prob", "cost", "staked", "pnl",
-]
-
-
-# ---------------------------------------------------------------------------
-# CSV helpers
-# ---------------------------------------------------------------------------
-
-def _read_csv(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def _append_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    exists = path.exists()
-    with open(path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        if not exists:
-            w.writeheader()
-        w.writerows(rows)
-
-
-# ---------------------------------------------------------------------------
-# 1. Settle matured predictions
-# ---------------------------------------------------------------------------
-
-def settle_predictions() -> int:
-    """Settle any unsettled, expired predictions against the real BTC outcome."""
-    from data.binance import get_close_at
-
-    preds = _read_csv(PREDICTIONS_CSV)
-    settled_ids = {r["pred_id"] for r in _read_csv(SETTLEMENTS_CSV)}
-    now = datetime.now(timezone.utc)
-
-    new_settlements: list[dict] = []
-    for p in preds:
-        if p["pred_id"] in settled_ids:
-            continue
-        try:
-            expiry = datetime.fromisoformat(p["expiry_iso"])
-        except (ValueError, KeyError):
-            continue
-        if expiry > now:
-            continue  # not matured yet
-
-        close = get_close_at(int(expiry.timestamp() * 1000))
-        if close is None:
-            continue  # price not available yet; retry next run
-
-        floor = float(p["floor_strike"]) if p.get("floor_strike") else None
-        cap = float(p["cap_strike"]) if p.get("cap_strike") else None
-        st = p.get("strike_type", "greater")
-        if st == "greater":
-            actual_yes = close > (floor if floor is not None else 0)
-        elif st == "less":
-            actual_yes = close < (cap if cap is not None else float("inf"))
-        elif st == "between" and floor is not None and cap is not None:
-            actual_yes = floor <= close <= cap
-        else:
-            continue
-
-        direction = p["direction"]
-        won = (direction == "YES" and actual_yes) or (direction == "NO" and not actual_yes)
-        cost = float(p["cost"])
-        staked = float(p["kelly_bet_usd"])
-        pnl = staked * ((1.0 - cost) / cost) if won else -staked
-
-        new_settlements.append({
-            "pred_id": p["pred_id"],
-            "settled_ts": now.isoformat(),
-            "actual_close": f"{close:.2f}",
-            "actual_yes": int(actual_yes),
-            "won": int(won),
-            "win_prob": p["win_prob"],
-            "cost": f"{cost:.4f}",
-            "staked": f"{staked:.2f}",
-            "pnl": f"{pnl:.2f}",
-        })
-
-    _append_csv(SETTLEMENTS_CSV, SETTLE_FIELDS, new_settlements)
-    logger.info("Settled %d matured predictions.", len(new_settlements))
-    return len(new_settlements)
-
-
-# ---------------------------------------------------------------------------
-# 2. Retrain model
-# ---------------------------------------------------------------------------
 
 def retrain_model() -> dict:
     from backtest.simulate import run_full_backtest
@@ -172,11 +68,8 @@ def retrain_model() -> dict:
     return results
 
 
-# ---------------------------------------------------------------------------
-# 3. Snapshot today's predictions
-# ---------------------------------------------------------------------------
-
-def snapshot_predictions() -> int:
+def record_and_trade() -> tuple[int, dict]:
+    """Scan all liquid markets, log the full dataset, run a paper cycle."""
     from kalshi.client import KalshiClient
     from alerts.engine import scan_markets
 
@@ -185,78 +78,32 @@ def snapshot_predictions() -> int:
         private_key_path=cfg.KALSHI_PRIVATE_KEY_PATH or None,
         demo=cfg.KALSHI_DEMO,
     )
-    qualifying = scan_markets(client, cfg)
-    now = datetime.now(timezone.utc)
+    try:
+        all_alerts = scan_markets(client, cfg, full=True)
+    except Exception as exc:
+        logger.exception("Scan failed: %s", exc)
+        all_alerts = []
 
-    rows: list[dict] = []
-    for a in qualifying:
-        expiry_dt = a.get("expiry_dt")
-        if expiry_dt is None:
-            continue
-        direction = a["direction"]
-        if direction == "YES":
-            cost = (a.get("yes_ask", 100) or 100) / 100.0
-            win_prob = a["model_prob"]
-        else:
-            cost = (a.get("no_ask", 100) or 100) / 100.0
-            win_prob = 1.0 - a["model_prob"]
-        if cost <= 0 or cost >= 1:
-            continue
+    n_new = prediction_log.record_predictions(all_alerts, cfg)
 
-        rows.append({
-            "pred_id": str(uuid.uuid4()),
-            "snapshot_ts": now.isoformat(),
-            "market_id": a["market_id"],
-            "strike_type": a.get("strike_type", "greater"),
-            "floor_strike": a.get("floor_strike") if a.get("floor_strike") is not None else "",
-            "cap_strike": a.get("cap_strike") if a.get("cap_strike") is not None else "",
-            "expiry_iso": expiry_dt.isoformat(),
-            "direction": direction,
-            "model_prob": f"{a['model_prob']:.4f}",
-            "win_prob": f"{win_prob:.4f}",
-            "cost": f"{cost:.4f}",
-            "edge": f"{a['edge']:.4f}",
-            "kelly_bet_usd": f"{a['kelly_bet_usd']:.2f}",
-        })
-
-    _append_csv(PREDICTIONS_CSV, PRED_FIELDS, rows)
-    logger.info("Snapshotted %d new predictions.", len(rows))
-
-    # Paper trading: settle matured positions and open new ones.
-    paper_summary = {}
+    paper_summary: dict = {}
     if getattr(cfg, "PAPER_TRADE", False):
         from paper.account import paper_trade_cycle
+        qualifying = [a for a in all_alerts if a.get("abs_edge", 0) >= cfg.EDGE_THRESHOLD]
         paper_summary = paper_trade_cycle(qualifying, cfg)
         logger.info("Paper account: %s", paper_summary)
 
-    return len(rows), paper_summary
+    return n_new, paper_summary
 
 
-# ---------------------------------------------------------------------------
-# 4. Report
-# ---------------------------------------------------------------------------
-
-def write_report(backtest_results: dict, n_settled: int, n_new: int, paper: dict) -> Path:
-    settlements = _read_csv(SETTLEMENTS_CSV)
-    preds = _read_csv(PREDICTIONS_CSV)
+def write_report(bt: dict, n_settled: int, n_new: int, paper: dict) -> Path:
     now = datetime.now(timezone.utc)
-
-    n = len(settlements)
-    if n:
-        wins = sum(int(s["won"]) for s in settlements)
-        total_pnl = sum(float(s["pnl"]) for s in settlements)
-        total_staked = sum(float(s["staked"]) for s in settlements)
-        hit_rate = wins / n
-        roi = total_pnl / total_staked if total_staked else 0.0
-        mean_pred = sum(float(s["win_prob"]) for s in settlements) / n
-        calibration_gap = mean_pred - hit_rate
-    else:
-        wins = total_pnl = total_staked = hit_rate = roi = mean_pred = calibration_gap = 0.0
+    cal = prediction_log.calibration_summary(cfg)
+    p = paper or {}
+    bt = bt or {}
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORTS_DIR / f"{now:%Y-%m-%d}.md"
-    bt = backtest_results or {}
-    p = paper or {}
     lines = [
         f"# Daily report — {now:%Y-%m-%d %H:%M UTC}",
         "",
@@ -270,26 +117,24 @@ def write_report(backtest_results: dict, n_settled: int, n_new: int, paper: dict
         f"- Closed trades: {p.get('closed_trades', 0)} @ "
         f"{p.get('win_rate', 0):.1%} win rate | ROI {p.get('roi', 0):+.1%}" if p else "",
         "",
-        "## Real performance (settled predictions)",
-        f"- Total settled bets: **{n}**",
-        f"- Open predictions awaiting settlement: **{len(preds) - n}**",
-        f"- Newly settled this run: {n_settled}",
-        f"- New predictions logged this run: {n_new}",
-        f"- Hit rate: **{hit_rate:.1%}**" if n else "- Hit rate: n/a (no settled bets yet)",
-        f"- Total P&L: **${total_pnl:+,.2f}** on ${total_staked:,.2f} staked (ROI {roi:+.1%})" if n else "",
-        f"- Mean predicted win prob: {mean_pred:.1%} | Calibration gap: {calibration_gap:+.1%}" if n else "",
+        "## Model calibration dataset (all liquid markets)",
+        f"- Settled outcomes: **{cal['settled']}** | Awaiting settlement: {cal['open']}",
+        f"- New predictions logged this run: {n_new} | Newly settled: {n_settled}",
+        f"- Hit rate: **{cal['hit_rate']:.1%}**" if cal["settled"] else "- Hit rate: n/a yet",
+        f"- Mean predicted: {cal['mean_pred']:.1%} | Calibration gap: "
+        f"{cal['calibration_gap']:+.1%} | Brier: {cal['brier']:.3f}" if cal["settled"] else "",
         "",
         "## Pipeline backtest (synthetic prices — sanity only, not real edge)",
         f"- Total bets: {bt.get('total_bets', 'n/a')}",
         f"- Win rate: {bt.get('win_rate', 0):.1%}" if bt else "- n/a",
         f"- ROI: {bt.get('roi', 0):.1%}" if bt else "",
-        f"- Sharpe: {bt.get('sharpe_ratio', 0):.2f}" if bt else "",
         "",
         "## Notes for next iteration",
-        "- If calibration gap is consistently positive, the model is "
-        "over-confident; consider lowering ml_weight or widening EDGE_THRESHOLD.",
-        "- If hit rate < cost-implied breakeven across many bets, the edge is "
-        "not real; revisit features or the volatility input.",
+        "- Brier score is the headline model-quality metric (lower = better; "
+        "0.25 = no skill). Track it across days.",
+        "- Positive calibration gap = model over-confident; consider the vol "
+        "input or lowering ML_WEIGHT.",
+        "- Only change strategy once there are ~30+ settled outcomes.",
         "",
     ]
     path.write_text("\n".join(l for l in lines if l is not None))
@@ -297,13 +142,11 @@ def write_report(backtest_results: dict, n_settled: int, n_new: int, paper: dict
     return path
 
 
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     logger.info("=== Daily backtest run starting ===")
-    n_settled = settle_predictions()
+    n_settled = prediction_log.settle_predictions(cfg)
     bt = retrain_model()
-    n_new, paper = snapshot_predictions()
+    n_new, paper = record_and_trade()
     report = write_report(bt, n_settled, n_new, paper)
     print(f"\nDaily run complete. Report: {report}")
     print(report.read_text())

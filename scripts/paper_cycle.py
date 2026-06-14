@@ -32,6 +32,7 @@ def main() -> None:
     from kalshi.client import KalshiClient
     from alerts.engine import scan_markets
     from paper.account import paper_trade_cycle
+    import prediction_log
 
     client = KalshiClient(
         api_key_id=cfg.KALSHI_API_KEY_ID or None,
@@ -39,17 +40,27 @@ def main() -> None:
         demo=cfg.KALSHI_DEMO,
     )
 
+    # Always settle matured predictions first (real outcomes), even if the scan fails.
+    prediction_log.settle_predictions(cfg)
+
     try:
-        qualifying = scan_markets(client, cfg)
+        all_alerts = scan_markets(client, cfg, full=True)
     except Exception as exc:
-        logger.exception("Scan failed (%s); still settling matured positions.", exc)
-        qualifying = []
+        logger.exception("Scan failed (%s); skipping new predictions/trades.", exc)
+        all_alerts = []
+
+    # Record the full unbiased dataset (every liquid market), then trade the edges.
+    prediction_log.record_predictions(all_alerts, cfg)
+    qualifying = [a for a in all_alerts if a.get("abs_edge", 0) >= cfg.EDGE_THRESHOLD]
 
     s = paper_trade_cycle(qualifying, cfg)
+    cal = prediction_log.calibration_summary(cfg)
     logger.info(
-        "Paper cycle done: equity=$%.2f realized=$%+.2f open=%d closed=%d win=%.0f%%",
+        "Paper cycle done: equity=$%.2f realized=$%+.2f open=%d closed=%d win=%.0f%% | "
+        "dataset: %d settled / %d open, brier=%.3f, calib_gap=%+.1f%%",
         s["equity"], s["realized_pnl"], s["open_positions"], s["closed_trades"],
-        s["win_rate"] * 100,
+        s["win_rate"] * 100, cal["settled"], cal["open"], cal["brier"],
+        cal["calibration_gap"] * 100,
     )
 
 
