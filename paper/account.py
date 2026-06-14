@@ -225,8 +225,24 @@ class PaperAccount:
 
 
 def paper_trade_cycle(qualifying: List[Dict[str, Any]], cfg) -> Dict[str, Any]:
-    """Run one full paper-trading cycle: settle matured positions, open new ones."""
-    acct = PaperAccount(cfg.PAPER_TRADES_CSV, cfg.PAPER_STARTING_BANKROLL)
-    acct.settle()
-    acct.open_positions(qualifying, cfg)
-    return acct.summary()
+    """
+    Run one full paper-trading cycle: settle matured positions, open new ones.
+
+    Guarded by an exclusive file lock so the always-on daemon and the daily
+    agent can't corrupt the account CSV if they run at the same time.
+    """
+    import fcntl
+
+    lock_path = Path(cfg.PAPER_TRADES_CSV).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.warning("Another paper cycle holds the lock; skipping this run.")
+            return PaperAccount(cfg.PAPER_TRADES_CSV, cfg.PAPER_STARTING_BANKROLL).summary()
+
+        acct = PaperAccount(cfg.PAPER_TRADES_CSV, cfg.PAPER_STARTING_BANKROLL)
+        acct.settle()
+        acct.open_positions(qualifying, cfg)
+        return acct.summary()

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent: runs the paper-trading cycle every 15 minutes, always on.
+  Install:
+    cp scripts/com.kalshibtc.papercycle.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.kalshibtc.papercycle.plist
+  Stop / uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.kalshibtc.papercycle.plist
+  Paths below are absolute for this machine; edit if you move the repo.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kalshibtc.papercycle</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/.venv/bin/python</string>
+        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/scripts/paper_cycle.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc</string>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/logs/paper_cycle.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/logs/paper_cycle.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

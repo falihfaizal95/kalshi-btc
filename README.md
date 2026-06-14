@@ -69,6 +69,22 @@ python -c "import config as c; from paper.account import PaperAccount; \
 print(PaperAccount(c.PAPER_TRADES_CSV, c.PAPER_STARTING_BANKROLL).summary())"
 ```
 
+### Always-on paper trading (macOS launchd)
+
+To let the account trade and learn continuously in the background, a launchd
+agent runs `scripts/paper_cycle.py` every 15 minutes (settles matured
+positions, opens new ones) independent of any terminal:
+
+```bash
+cp scripts/com.kalshibtc.papercycle.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/com.kalshibtc.papercycle.plist
+```
+
+Stop it with `launchctl unload -w ~/Library/LaunchAgents/com.kalshibtc.papercycle.plist`.
+Output goes to `logs/paper_cycle.out` / `.err`. The agent runs whenever you're
+logged in (it pauses while the Mac is asleep/off). A single cycle on demand:
+`python scripts/paper_cycle.py`.
+
 ## Configuration (`.env`)
 
 | Variable | Default | Meaning |

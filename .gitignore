@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .env
 models/btc_model.pkl
-logs/*.csv
+logs/*
+!logs/.gitkeep
+tracking/*.lock
 .venv/
