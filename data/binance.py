@@ -112,6 +112,31 @@ def get_current_price(symbol: str = "BTCUSDT") -> float:
     raise RuntimeError(f"Binance ticker/price request failed for {symbol}: {last_exc}") from last_exc
 
 
+def get_close_at(timestamp_ms: int, symbol: str = "BTCUSDT") -> Optional[float]:
+    """
+    Fetch the BTC close price for the 1h candle covering ``timestamp_ms``.
+
+    Used to settle past predictions against the actual outcome. Returns None
+    if no candle is available (e.g. timestamp is in the future).
+    """
+    params = {
+        "symbol": symbol,
+        "interval": "1h",
+        "startTime": int(timestamp_ms),
+        "limit": 1,
+    }
+    for base in BINANCE_BASES:
+        try:
+            resp = requests.get(f"{base}/klines", params=params, timeout=10)
+            resp.raise_for_status()
+            raw = resp.json()
+            if raw:
+                return float(raw[0][4])  # close
+        except (requests.RequestException, KeyError, ValueError, IndexError) as exc:
+            logger.warning("Binance get_close_at failed at %s: %s", base, exc)
+    return None
+
+
 def get_ohlcv_multi(
     symbol: str = "BTCUSDT",
     intervals: Optional[List[str]] = None,

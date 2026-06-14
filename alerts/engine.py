@@ -270,6 +270,9 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
                 "yes_bid": market.get("yes_bid", 0),
                 "yes_ask": market.get("yes_ask", 100),
                 "no_ask": market.get("no_ask", 100),
+                "strike_type": market.get("strike_type", "greater"),
+                "floor_strike": market.get("floor_strike"),
+                "cap_strike": market.get("cap_strike"),
             }
         )
 
