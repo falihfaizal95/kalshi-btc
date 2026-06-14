@@ -50,8 +50,24 @@ python main.py --backtest-only  # run backtest + train model, then exit
 python main.py --no-train       # skip training, scan immediately
 ```
 
-Set `AUTO_TRADE=true` in `.env` to place orders on qualifying markets
-(requires API credentials). Default is alerts only.
+### Trading modes
+
+- **Alerts only** (`PAPER_TRADE=false`, `AUTO_TRADE=false`) — just prints/logs.
+- **Paper trading** (`PAPER_TRADE=true`, the default) — simulates fills at the
+  ask against a virtual bankroll, settles each position against the actual BTC
+  outcome, and tracks running P&L in `tracking/paper_trades.csv`. No money or
+  account required. This builds the real-outcome track record the strategy
+  learns from.
+- **Live trading** (`AUTO_TRADE=true`) — places real Kalshi orders. Requires
+  API credentials and takes precedence over paper trading.
+
+The paper account compounds across runs (the CSV is committed to git). Check
+its status anytime:
+
+```bash
+python -c "import config as c; from paper.account import PaperAccount; \
+print(PaperAccount(c.PAPER_TRADES_CSV, c.PAPER_STARTING_BANKROLL).summary())"
+```
 
 ## Configuration (`.env`)
 

@@ -126,6 +126,16 @@ def _run_scan(client) -> None:
         from alerts.engine import scan_markets
         qualifying = scan_markets(client, cfg)
         logger.info("Scan complete — %d qualifying opportunities.", len(qualifying))
+
+        # Paper trading: simulate fills + settle against real outcomes.
+        if cfg.PAPER_TRADE and not cfg.AUTO_TRADE:
+            from paper.account import paper_trade_cycle
+            s = paper_trade_cycle(qualifying, cfg)
+            console.print(
+                f"[cyan]Paper account: equity ${s['equity']:,.2f} "
+                f"({s['realized_pnl']:+,.2f}) | {s['open_positions']} open | "
+                f"{s['closed_trades']} closed @ {s['win_rate']:.0%} win[/cyan]"
+            )
     except Exception as exc:
         console.print(f"[red]Scan error: {exc}[/red]")
         logger.exception("Scan error: %s", exc)

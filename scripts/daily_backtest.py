@@ -221,14 +221,22 @@ def snapshot_predictions() -> int:
 
     _append_csv(PREDICTIONS_CSV, PRED_FIELDS, rows)
     logger.info("Snapshotted %d new predictions.", len(rows))
-    return len(rows)
+
+    # Paper trading: settle matured positions and open new ones.
+    paper_summary = {}
+    if getattr(cfg, "PAPER_TRADE", False):
+        from paper.account import paper_trade_cycle
+        paper_summary = paper_trade_cycle(qualifying, cfg)
+        logger.info("Paper account: %s", paper_summary)
+
+    return len(rows), paper_summary
 
 
 # ---------------------------------------------------------------------------
 # 4. Report
 # ---------------------------------------------------------------------------
 
-def write_report(backtest_results: dict, n_settled: int, n_new: int) -> Path:
+def write_report(backtest_results: dict, n_settled: int, n_new: int, paper: dict) -> Path:
     settlements = _read_csv(SETTLEMENTS_CSV)
     preds = _read_csv(PREDICTIONS_CSV)
     now = datetime.now(timezone.utc)
@@ -248,8 +256,19 @@ def write_report(backtest_results: dict, n_settled: int, n_new: int) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORTS_DIR / f"{now:%Y-%m-%d}.md"
     bt = backtest_results or {}
+    p = paper or {}
     lines = [
         f"# Daily report — {now:%Y-%m-%d %H:%M UTC}",
+        "",
+        "## Paper trading account",
+        f"- Equity: **${p.get('equity', 0):,.2f}** "
+        f"(started ${p.get('starting_bankroll', 0):,.2f}, "
+        f"realized P&L ${p.get('realized_pnl', 0):+,.2f})" if p else "- (paper trading disabled)",
+        f"- Open positions: {p.get('open_positions', 0)} "
+        f"(${p.get('open_stake', 0):,.2f} staked) | "
+        f"Available cash: ${p.get('available_cash', 0):,.2f}" if p else "",
+        f"- Closed trades: {p.get('closed_trades', 0)} @ "
+        f"{p.get('win_rate', 0):.1%} win rate | ROI {p.get('roi', 0):+.1%}" if p else "",
         "",
         "## Real performance (settled predictions)",
         f"- Total settled bets: **{n}**",
@@ -284,8 +303,8 @@ def main() -> None:
     logger.info("=== Daily backtest run starting ===")
     n_settled = settle_predictions()
     bt = retrain_model()
-    n_new = snapshot_predictions()
-    report = write_report(bt, n_settled, n_new)
+    n_new, paper = snapshot_predictions()
+    report = write_report(bt, n_settled, n_new, paper)
     print(f"\nDaily run complete. Report: {report}")
     print(report.read_text())
 

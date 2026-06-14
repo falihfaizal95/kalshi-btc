@@ -35,10 +35,19 @@ ML_WEIGHT: float = float(os.getenv("ML_WEIGHT", "0"))
 _auto_trade_raw: str = os.getenv("AUTO_TRADE", "false").strip().lower()
 AUTO_TRADE: bool = _auto_trade_raw in ("1", "true", "yes", "on")
 
+# Paper trading: simulate fills against a virtual bankroll instead of placing
+# real orders. Default ON so the bot can build a real-outcome track record
+# with no money at risk. AUTO_TRADE (real orders) takes precedence if both set.
+_paper_raw: str = os.getenv("PAPER_TRADE", "true").strip().lower()
+PAPER_TRADE: bool = _paper_raw in ("1", "true", "yes", "on")
+PAPER_STARTING_BANKROLL: float = float(os.getenv("PAPER_STARTING_BANKROLL", str(BANKROLL)))
+
 # Derived paths
 ROOT_DIR = pathlib.Path(__file__).parent
 MODELS_DIR = ROOT_DIR / "models"
 LOGS_DIR = ROOT_DIR / "logs"
+TRACKING_DIR = ROOT_DIR / "tracking"
 MODEL_PKL_PATH = MODELS_DIR / "btc_model.pkl"
 ALERTS_CSV = LOGS_DIR / "alerts.csv"
 TRADES_CSV = LOGS_DIR / "trades.csv"
+PAPER_TRADES_CSV = TRACKING_DIR / "paper_trades.csv"
