@@ -182,7 +182,7 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
     # ------------------------------------------------------------------
     # 2. Score each market
     # ------------------------------------------------------------------
-    ensemble = EnsembleModel(ml_weight=0.6)
+    ensemble = EnsembleModel(ml_weight=getattr(cfg, "ML_WEIGHT", 0.0))
     alerts: List[Dict[str, Any]] = []
 
     for market in markets:
@@ -201,12 +201,17 @@ def scan_markets(client, cfg) -> List[Dict[str, Any]]:
         if time_to_expiry_h < 0.05:
             continue  # market essentially expired
 
-        # Skip empty/illiquid books — a missing ask defaults to 100¢, which
-        # would otherwise produce a meaningless 50¢ mid and a fake edge.
-        yes_bid_c = float(market.get("yes_bid", 0) or 0)
-        yes_ask_c = float(market.get("yes_ask", 100) or 100)
+        # Only trade within the configured window (default: the upcoming hour)
+        if time_to_expiry_h > getattr(cfg, "MAX_EXPIRY_HOURS", 1.0):
+            continue
+
+        # Require a genuine two-sided book. Newly-listed markets often have a
+        # one-sided or empty book (e.g. yes_bid=None, lone 1¢ ask), which would
+        # otherwise produce a meaningless mid and a huge fake edge.
+        yes_bid_c = float(market.get("yes_bid") or 0)
+        yes_ask_c = float(market.get("yes_ask") or 100)
         max_spread = getattr(cfg, "MAX_SPREAD_CENTS", 10.0)
-        if yes_ask_c >= 100 or (yes_ask_c - yes_bid_c) > max_spread:
+        if yes_bid_c < 1 or yes_ask_c > 99 or (yes_ask_c - yes_bid_c) > max_spread:
             continue
 
         # Log-normal probability of YES (handles greater/less/between markets)

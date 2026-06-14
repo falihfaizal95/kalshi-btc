@@ -24,6 +24,12 @@ MAX_BET_PCT: float = float(os.getenv("MAX_BET_PCT", "0.05"))
 EDGE_THRESHOLD: float = float(os.getenv("EDGE_THRESHOLD", "0.05"))
 # Skip markets whose bid/ask spread is wider than this (illiquid/empty books)
 MAX_SPREAD_CENTS: float = float(os.getenv("MAX_SPREAD_CENTS", "10"))
+# Only trade markets expiring within this many hours (default: the next hour only)
+MAX_EXPIRY_HOURS: float = float(os.getenv("MAX_EXPIRY_HOURS", "1"))
+# Weight of the XGBoost model in the ensemble. Default 0 (lognormal only): the
+# model is trained on synthetic backtest data and is untrustworthy live until
+# the daily loop has retrained it on real settled outcomes.
+ML_WEIGHT: float = float(os.getenv("ML_WEIGHT", "0"))
 
 # Auto-trade flag
 _auto_trade_raw: str = os.getenv("AUTO_TRADE", "false").strip().lower()
