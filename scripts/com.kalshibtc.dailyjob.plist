@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent: runs the daily backtest/retrain/report + git push once a day.
+  Reliable fallback that needs no interactive approval (unlike the cloud agent).
+  Install:
+    cp scripts/com.kalshibtc.dailyjob.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.kalshibtc.dailyjob.plist
+  Stop / uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.kalshibtc.dailyjob.plist
+  Runs at 08:20 local time daily (or on next login if the Mac was off then).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kalshibtc.dailyjob</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/scripts/daily_job.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/logs/daily_job.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/logs/daily_job.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
