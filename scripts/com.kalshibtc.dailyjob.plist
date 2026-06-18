@@ -16,8 +16,8 @@
     <string>com.kalshibtc.dailyjob</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/scripts/daily_job.sh</string>
+        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/.venv/bin/python</string>
+        <string>/Users/falihfaizal/Desktop/projects/kalshi-btc/scripts/daily_job.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/falihfaizal/Desktop/projects/kalshi-btc</string>
