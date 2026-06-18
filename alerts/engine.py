@@ -176,6 +176,11 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
         iv = 0.65
         console.print(f"[yellow]IV fetch failed ({exc}); using default {iv:.0%}[/yellow]")
 
+    # Price sub-hour markets with horizon-matched realized vol, not 30-day DVOL.
+    from data.volatility import pricing_vol
+    vol_price = pricing_vol(iv)
+    console.print(f"[green]Short-horizon vol (pricing): {vol_price:.1%}[/green]")
+
     console.print("[bold cyan]Fetching Fear & Greed index...[/bold cyan]")
     fg_data = get_fear_greed()
     fear_greed_score = int(fg_data.get("score", 50))
@@ -217,8 +222,9 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
         if yes_bid_c < 1 or yes_ask_c > 99 or (yes_ask_c - yes_bid_c) > max_spread:
             continue
 
-        # Log-normal probability of YES (handles greater/less/between markets)
-        ln_prob = market_yes_prob(btc_price, market, time_to_expiry_h, iv)
+        # Log-normal probability of YES (handles greater/less/between markets).
+        # Uses horizon-matched realized vol for accurate near-the-money pricing.
+        ln_prob = market_yes_prob(btc_price, market, time_to_expiry_h, vol_price)
 
         # Build features
         try:

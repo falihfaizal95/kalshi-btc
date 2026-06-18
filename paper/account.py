@@ -169,7 +169,9 @@ class PaperAccount:
             if frac <= 0:
                 continue
 
-            target_stake = min(self.equity * frac, available)
+            # Size off the fixed starting bankroll (not compounding equity) so
+            # paper stakes stay realistic for the real account size.
+            target_stake = min(self.starting_bankroll * frac, available)
             contracts = int(math.floor(target_stake / cost))
             if contracts < 1:
                 continue

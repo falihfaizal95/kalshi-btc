@@ -25,6 +25,7 @@ PRED_FIELDS = [
     "pred_id", "snapshot_ts", "market_id", "strike_type",
     "floor_strike", "cap_strike", "expiry_iso", "direction",
     "model_prob", "win_prob", "cost", "edge", "kelly_bet_usd",
+    "btc_price",
 ]
 SETTLE_FIELDS = [
     "pred_id", "settled_ts", "actual_close", "actual_yes", "won",
@@ -43,9 +44,24 @@ def _append_csv(path: Path, fields: List[str], rows: List[Dict[str, Any]]) -> No
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Migration-safe: if the existing header doesn't match (e.g. a new column was
+    # added), rewrite the file with the new schema, backfilling missing values.
+    if path.exists():
+        with open(path, newline="") as f:
+            header = next(csv.reader(f), None)
+        if header is not None and header != fields:
+            existing = _read_csv(path)
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
+                w.writeheader()
+                w.writerows(existing)
+                w.writerows(rows)
+            return
+
     exists = path.exists()
     with open(path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
         if not exists:
             w.writeheader()
         w.writerows(rows)
@@ -89,6 +105,7 @@ def record_predictions(alerts: List[Dict[str, Any]], cfg) -> int:
             "cost": f"{cost:.4f}",
             "edge": f"{a['edge']:.4f}",
             "kelly_bet_usd": f"{a['kelly_bet_usd']:.2f}",
+            "btc_price": f"{a.get('current_price', 0):.2f}",
         })
 
     _append_csv(cfg.PREDICTIONS_CSV, PRED_FIELDS, rows)
