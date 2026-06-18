@@ -6,3 +6,5 @@ logs/*
 !logs/.gitkeep
 tracking/*.lock
 .venv/
+
+tracking/.daily_done

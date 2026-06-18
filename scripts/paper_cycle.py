@@ -63,6 +63,15 @@ def main() -> None:
         cal["calibration_gap"] * 100,
     )
 
+    # Once per day, piggyback the daily retrain + report + git push on this
+    # proven-working daemon (a separate daily launchd agent hit EX_CONFIG here).
+    try:
+        from daily_job import maybe_run_daily
+        if maybe_run_daily():
+            logger.info("Daily job ran (retrain + commit + push).")
+    except Exception as exc:
+        logger.exception("Daily job piggyback failed: %s", exc)
+
 
 if __name__ == "__main__":
     main()
