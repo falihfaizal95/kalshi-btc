@@ -30,6 +30,9 @@ MAX_EXPIRY_HOURS: float = float(os.getenv("MAX_EXPIRY_HOURS", "1"))
 # model is trained on synthetic backtest data and is untrustworthy live until
 # the daily loop has retrained it on real settled outcomes.
 ML_WEIGHT: float = float(os.getenv("ML_WEIGHT", "0"))
+# "Confident" trading window: minutes-to-expiry under which plays are most
+# reliable (outcome more locked in). Used by the phone-alert recommender.
+CONFIDENT_WINDOW_MINUTES: float = float(os.getenv("CONFIDENT_WINDOW_MINUTES", "30"))
 
 # Auto-trade flag
 _auto_trade_raw: str = os.getenv("AUTO_TRADE", "false").strip().lower()
