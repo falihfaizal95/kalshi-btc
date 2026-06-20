@@ -65,6 +65,15 @@ def retrain_model() -> dict:
         logger.info("Model retrained and saved.")
     except Exception as exc:
         logger.warning("Retrain failed: %s", exc)
+
+    # Refit the model+market calibrator on the growing real-outcome dataset.
+    try:
+        from models.calibrator import train_from_history
+        if train_from_history(cfg):
+            logger.info("Calibrator refit on real outcomes.")
+    except Exception as exc:
+        logger.warning("Calibrator refit failed: %s", exc)
+
     return results
 
 

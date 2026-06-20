@@ -191,6 +191,15 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
     # 2. Score each market
     # ------------------------------------------------------------------
     ensemble = EnsembleModel(ml_weight=getattr(cfg, "ML_WEIGHT", 0.0))
+
+    # Calibrator: learned blend of our model with the market price (the market
+    # is the stronger signal). No-op until enough real outcomes have accrued.
+    from models.calibrator import Calibrator
+    calibrator = Calibrator(cfg.MODELS_DIR / "calibrator.pkl")
+    using_calibrator = calibrator.load()
+    if using_calibrator:
+        console.print("[green]Using learned model+market calibrator.[/green]")
+
     alerts: List[Dict[str, Any]] = []
 
     for market in markets:
@@ -241,6 +250,10 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
 
         # Ensemble prediction
         ensemble_prob = ensemble.predict(ln_prob, features_dict=features)
+
+        # Calibrate against the market's own implied probability (learned blend).
+        market_yes = (yes_bid_c + yes_ask_c) / 2.0 / 100.0
+        ensemble_prob = calibrator.predict(ensemble_prob, market_yes)
 
         # Edge
         edge = compute_edge(market, ensemble_prob)
