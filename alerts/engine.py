@@ -278,6 +278,9 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
             max_bet_pct=cfg.MAX_BET_PCT,
         )
 
+        # Expected return per $1 staked on the favored side (the returns metric).
+        ev = (win_prob / cost - 1.0) if cost > 0 else 0.0
+
         expiry_str = expiry.strftime("%m/%d %H:%M") if expiry else "N/A"
 
         alerts.append(
@@ -294,6 +297,7 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
                 "kelly_bet_usd": kelly_usd,
                 "direction": direction,
                 "abs_edge": abs(edge),
+                "ev": ev,
                 "yes_bid": market.get("yes_bid", 0),
                 "yes_ask": market.get("yes_ask", 100),
                 "no_ask": market.get("no_ask", 100),
@@ -303,11 +307,12 @@ def scan_markets(client, cfg, full: bool = False) -> List[Dict[str, Any]]:
             }
         )
 
-    # Sort by absolute edge descending
-    alerts.sort(key=lambda a: a["abs_edge"], reverse=True)
+    # Rank by expected return (the returns-maximizing metric)
+    alerts.sort(key=lambda a: a.get("ev", 0.0), reverse=True)
 
-    # Filter by threshold
-    qualifying = [a for a in alerts if a["abs_edge"] >= cfg.EDGE_THRESHOLD]
+    # Qualify trades by expected return, not raw edge
+    ev_threshold = getattr(cfg, "EV_THRESHOLD", 0.15)
+    qualifying = [a for a in alerts if a.get("ev", 0.0) >= ev_threshold]
 
     # ------------------------------------------------------------------
     # 3. Display rich table

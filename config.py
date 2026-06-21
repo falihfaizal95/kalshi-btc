@@ -33,6 +33,9 @@ ML_WEIGHT: float = float(os.getenv("ML_WEIGHT", "0"))
 # "Confident" trading window: minutes-to-expiry under which plays are most
 # reliable (outcome more locked in). Used by the phone-alert recommender.
 CONFIDENT_WINDOW_MINUTES: float = float(os.getenv("CONFIDENT_WINDOW_MINUTES", "30"))
+# Select trades by expected return, not raw edge. Out-of-sample, requiring a
+# >=15% expected return per $1 staked ~tripled ROI vs. betting every +EV market.
+EV_THRESHOLD: float = float(os.getenv("EV_THRESHOLD", "0.15"))
 
 # Auto-trade flag
 _auto_trade_raw: str = os.getenv("AUTO_TRADE", "false").strip().lower()

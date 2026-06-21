@@ -34,9 +34,8 @@ def _fmt(a: dict, now: datetime) -> str:
     mins = (a["expiry_dt"] - now).total_seconds() / 60.0
     side = a["direction"]
     entry = int(a["yes_ask"]) if side == "YES" else int(a["no_ask"])
-    title = a.get("title") or a["market_id"]
     return (
-        f"  {side:3} @ {entry:>2}c  | model {a['model_prob']:>4.0%}  edge {a['edge']:+5.1%}  "
+        f"  {side:3} @ {entry:>2}c  | exp.return {a.get('ev', 0):+5.0%}  model {a['model_prob']:>4.0%}  "
         f"| {mins:>4.0f}m left | {a['market_id']}"
     )
 
@@ -65,14 +64,15 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     window = cfg.CONFIDENT_WINDOW_MINUTES
 
-    qual = [a for a in alerts if a.get("abs_edge", 0) >= cfg.EDGE_THRESHOLD]
+    ev_thr = getattr(cfg, "EV_THRESHOLD", 0.15)
+    qual = [a for a in alerts if a.get("ev", 0) >= ev_thr]
     confident = sorted(
         [a for a in qual if (a["expiry_dt"] - now).total_seconds() / 60.0 <= window],
-        key=lambda a: a["abs_edge"], reverse=True,
+        key=lambda a: a.get("ev", 0), reverse=True,
     )
     rest = sorted(
         [a for a in qual if (a["expiry_dt"] - now).total_seconds() / 60.0 > window],
-        key=lambda a: a["abs_edge"], reverse=True,
+        key=lambda a: a.get("ev", 0), reverse=True,
     )
 
     print(f"\nBTC ${alerts[0]['current_price']:,.0f}  |  {now:%H:%M UTC}  |  "
